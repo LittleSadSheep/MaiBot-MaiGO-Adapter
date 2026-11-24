@@ -1,10 +1,10 @@
 {
   "manifest_version": 2,
   "version": "0.1.0",
-  "name": "MaiBot-Switch-Adapter",
-  "description": "轻量连接 MaiSwitch 跨端记忆与生活流中心：自动采集互通群/私聊发言、向规划与回复双钩子按可见性注入慢快记忆视图及跨端熟人名片，并承接开播喊人与经历检索工具。",
+  "name": "MaiBot-MaiGO-Adapter",
+  "description": "轻量连接 MaiGO 跨端记忆与生活流中心：自动采集互通群/私聊发言、向规划与回复双钩子按可见性注入慢快记忆视图及跨端熟人名片，并承接开播喊人与经历检索工具。",
   "author": {
-    "name": "MaiSwitch 贡献者",
+    "name": "MaiGO 贡献者",
     "url": "https://github.com/Mai-with-u"
   },
   "license": "MIT",
@@ -32,5 +32,5 @@
       "zh-CN"
     ]
   },
-  "id": "maiswitch.switch-adapter"
+  "id": "maigo.maibot-adapter"
 }

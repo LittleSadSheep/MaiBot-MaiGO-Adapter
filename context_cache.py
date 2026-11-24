@@ -80,7 +80,7 @@ class SessionTracker:
         retry_ms: int = _RESOLVE_RETRY_MS,
     ) -> None:
         self._ctx = ctx
-        self._logger = logger or logging.getLogger("plugin.maiswitch_adapter")
+        self._logger = logger or logging.getLogger("plugin.maigo_adapter")
         self._clock_ms = clock_ms
         self._retry_ms = retry_ms
         self._platform = "qq"
@@ -227,7 +227,7 @@ class SessionTracker:
 
 @dataclass
 class CachedVisibilityView:
-    """按可见性分桶存盘的 MaiSwitch 双层视图快照。"""
+    """按可见性分桶存盘的 MaiGO 双层视图快照。"""
 
     brief_etag: str = ""
     stable_brief: str = ""
@@ -278,7 +278,7 @@ class ContextCacheStore:
         clock_ms: Callable[[], int] = _default_now_ms,
     ) -> None:
         self._path = cache_path
-        self._logger = logger or logging.getLogger("plugin.maiswitch_adapter")
+        self._logger = logger or logging.getLogger("plugin.maigo_adapter")
         self._clock_ms = clock_ms
         self._views: Dict[str, CachedVisibilityView] = {}
         self.active_sessions: List[Dict[str, Any]] = []
@@ -326,7 +326,7 @@ class ContextCacheStore:
         try:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
         except Exception as exc:
-            self._logger.error(f"读取 MaiSwitch 本地缓存失败（{self._path}），从空状态起步: {exc}")
+            self._logger.error(f"读取 MaiGO 本地缓存失败（{self._path}），从空状态起步: {exc}")
             self._views = {}
             self.active_sessions = []
             return
@@ -353,7 +353,7 @@ class ContextCacheStore:
             tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
             os.replace(tmp, self._path)
         except OSError as exc:
-            self._logger.error(f"写入 MaiSwitch 本地缓存失败（{self._path}）: {exc}")
+            self._logger.error(f"写入 MaiGO 本地缓存失败（{self._path}）: {exc}")
 
 
 def build_context_item(text: str, *, item_id: str, stable: bool) -> Dict[str, Any]:
@@ -370,7 +370,7 @@ def build_context_item(text: str, *, item_id: str, stable: bool) -> Dict[str, An
     }
 
 
-def insert_stable_brief_item(items: List[Any], text: str, *, item_id: str = "maiswitch-stable-brief") -> List[Any]:
+def insert_stable_brief_item(items: List[Any], text: str, *, item_id: str = "maigo-stable-brief") -> List[Any]:
     """将慢层今日生活与近期立场插在 SystemMessageItem 之后、对话历史之前以最大化前缀缓存命中。"""
     if not text.strip():
         return list(items)
@@ -381,18 +381,16 @@ def insert_stable_brief_item(items: List[Any], text: str, *, item_id: str = "mai
             break
         pos += 1
     wrapped = (
-        "<maiswitch-life-brief>\n"
+        "<maigo-life-brief>\n"
         "以下是关于你自己的跨端生活背景与长期记忆（今天经历与近期表态）：\n"
         f"{text.strip()}\n"
-        "</maiswitch-life-brief>"
+        "</maigo-life-brief>"
     )
     new_items.insert(pos, build_context_item(wrapped, item_id=item_id, stable=True))
     return new_items
 
 
-def insert_dynamic_context_item(
-    items: List[Any], text: str, *, item_id: str = "maiswitch-dynamic-context"
-) -> List[Any]:
+def insert_dynamic_context_item(items: List[Any], text: str, *, item_id: str = "maigo-dynamic-context") -> List[Any]:
     """将快层实时态势、熟人名片与鲜活话头插在请求末尾指令项之前。"""
     if not text.strip():
         return list(items)
@@ -443,8 +441,8 @@ def format_dynamic_block(
         return ""
     body = "\n\n".join(sections)
     return (
-        "<maiswitch-context>\n"
+        "<maigo-context>\n"
         "关于你自己的跨端事实（被问到最近在干嘛、直播近况或对应经历时照此如实衔接，勿另编细节）：\n"
         f"{body}\n"
-        "</maiswitch-context>"
+        "</maigo-context>"
     )

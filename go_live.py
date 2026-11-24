@@ -1,4 +1,4 @@
-"""跨端开播提示：基于 MaiSwitch 在播状态，延迟确认正式场稳定后唤醒 QQ 麦麦进群喊人。"""
+"""跨端开播提示：基于 MaiGO 在播状态，延迟确认正式场稳定后唤醒 QQ 麦麦进群喊人。"""
 
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ class GoLiveSettings:
 class GoLiveAnnouncer:
     """跟踪来自其他分支（如 Amaidesu）的在播场次，满足稳定时长后托 QQ 麦麦喊人。
 
-    触发条件：后台定时轮询收到 MaiSwitch ``active_sessions`` 更新时 ``observe_and_tick``；
+    触发条件：后台定时轮询收到 MaiGO ``active_sessions`` 更新时 ``observe_and_tick``；
     执行顺序：过滤本分支场次 -> 按 ``checkout_id`` 检查历史已喊落盘 -> 核对心跳未过期且
     已稳定超过 ``delay_ms`` -> 先记入落盘集合防重发 -> 逐群调用 ``maisaka.proactive.trigger``。
     """
@@ -63,7 +63,7 @@ class GoLiveAnnouncer:
         self._ctx = ctx
         self._settings = settings
         self._state_path = state_path
-        self._logger = logger or logging.getLogger("plugin.maiswitch_adapter")
+        self._logger = logger or logging.getLogger("plugin.maigo_adapter")
         self._clock_ms = clock_ms
         self._announced: List[str] = []
 
@@ -140,9 +140,9 @@ class GoLiveAnnouncer:
         res = await self._ctx.maisaka.proactive.trigger(
             str(stream["stream_id"]),
             request,
-            reason="maiswitch_go_live",
+            reason="maigo_go_live",
             priority="高",
-            metadata={"source": "maiswitch", "checkout_id": checkout_id},
+            metadata={"source": "maigo", "checkout_id": checkout_id},
         )
         if isinstance(res, dict) and res.get("success") is True:
             self._logger.info(f"已触发 QQ 麦麦到群 {group_id} 喊人看直播（checkout={checkout_id}）")

@@ -1,4 +1,4 @@
-"""MaiBot-Switch-Adapter 配置模型定义。"""
+"""MaiBot-MaiGO-Adapter 配置模型定义。"""
 
 from __future__ import annotations
 
@@ -12,27 +12,27 @@ class PluginSectionConfig(PluginConfigBase):
 
     __ui_label__ = "插件"
 
-    enabled: bool = Field(default=True, description="是否启用 MaiSwitch 跨端记忆适配器")
+    enabled: bool = Field(default=True, description="是否启用 MaiGO 跨端记忆适配器")
     config_version: str = Field(default="0.1.0", description="配置文件结构版本")
 
 
-class SwitchServerConfig(PluginConfigBase):
-    """MaiSwitch 服务端连接配置。"""
+class MaiGOServerConfig(PluginConfigBase):
+    """MaiGO 服务端连接配置。"""
 
-    __ui_label__ = "MaiSwitch 服务"
+    __ui_label__ = "MaiGO 服务"
 
     url: str = Field(
         default="http://127.0.0.1:8768",
-        description="MaiSwitch HTTP 服务根地址；为空时停用远端同步，插件优雅降级",
+        description="MaiGO HTTP 服务根地址；为空时停用远端同步，插件优雅降级",
     )
     token: str = Field(
         default="",
-        description="与 MaiSwitch auth_token 一致的 Bearer 令牌；本机未设令牌时可留空",
+        description="与 MaiGO auth_token 一致的 Bearer 令牌；本机未设令牌时可留空",
         json_schema_extra={"input_type": "password", "label": "访问令牌"},
     )
     branch_id: str = Field(
         default="maibot",
-        description="向 MaiSwitch 自报的分支标识（默认 maibot）",
+        description="向 MaiGO 自报的分支标识（默认 maibot）",
     )
     poll_interval_ms: int = Field(
         default=30_000,
@@ -42,7 +42,7 @@ class SwitchServerConfig(PluginConfigBase):
     request_timeout_ms: int = Field(
         default=5_000,
         ge=500,
-        description="单次请求 MaiSwitch 接口的超时上限（毫秒）",
+        description="单次请求 MaiGO 接口的超时上限（毫秒）",
     )
 
 
@@ -98,11 +98,11 @@ class GoLiveNotifyConfig(PluginConfigBase):
     )
 
 
-class SwitchAdapterConfig(PluginConfigBase):
-    """MaiBot-Switch-Adapter 顶层配置根。"""
+class MaiGOAdapterConfig(PluginConfigBase):
+    """MaiBot-MaiGO-Adapter 顶层配置根。"""
 
     plugin: PluginSectionConfig = Field(default_factory=PluginSectionConfig)
-    server: SwitchServerConfig = Field(default_factory=SwitchServerConfig)
+    server: MaiGOServerConfig = Field(default_factory=MaiGOServerConfig)
     scope: ScopeConfig = Field(default_factory=ScopeConfig)
     injection: InjectionConfig = Field(default_factory=InjectionConfig)
     go_live: GoLiveNotifyConfig = Field(default_factory=GoLiveNotifyConfig)

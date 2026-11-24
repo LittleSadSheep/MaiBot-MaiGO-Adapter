@@ -1,4 +1,4 @@
-"""MaiBot-Switch-Adapter 主插件：连接 MaiBot 与 MaiSwitch 跨端记忆生活流中心。"""
+"""MaiBot-MaiGO-Adapter 主插件：连接 MaiBot 与 MaiGO 跨端记忆生活流中心。"""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import uuid
 from maibot_sdk import HookHandler, MaiBotPlugin, Tool
 from maibot_sdk.types import ToolParameterInfo, ToolParamType
 
-from .config import SwitchAdapterConfig
+from .config import MaiGOAdapterConfig
 from .context_cache import (
     ContextCacheStore,
     SessionTracker,
@@ -20,7 +20,7 @@ from .context_cache import (
     insert_stable_brief_item,
 )
 from .go_live import GoLiveAnnouncer, GoLiveSettings
-from .switch_client import HttpSwitchClient, SwitchClient, SwitchClientError
+from .maigo_client import HttpMaiGOClient, MaiGOClient, MaiGOClientError
 
 _CONTEXT_ITEM_SCHEMA_VERSION = 1
 
@@ -29,8 +29,8 @@ def _default_now_ms() -> int:
     return int(time.time() * 1000)
 
 
-class MaiSwitchAdapterPlugin(MaiBotPlugin):
-    """零侵入对接 MaiSwitch 的 MaiBot 轻量适配器插件。
+class MaiGOAdapterPlugin(MaiBotPlugin):
+    """零侵入对接 MaiGO 的 MaiBot 轻量适配器插件。
 
     职责边界：
     1. 入站监听 ``chat.receive.after_process`` 追踪会话作用域与近期发言人；
@@ -40,12 +40,12 @@ class MaiSwitchAdapterPlugin(MaiBotPlugin):
     4. 定时刷新本地缓存，监听其他端稳定开播并在通知群延迟喊人，暴露 ``recall_life`` 工具供按需检索。
     """
 
-    config_model = SwitchAdapterConfig
+    config_model = MaiGOAdapterConfig
 
     def __init__(
         self,
         *,
-        client_factory: Optional[Callable[[SwitchAdapterConfig], SwitchClient]] = None,
+        client_factory: Optional[Callable[[MaiGOAdapterConfig], MaiGOClient]] = None,
         clock_ms: Callable[[], int] = _default_now_ms,
         start_background: bool = True,
     ) -> None:
@@ -53,7 +53,7 @@ class MaiSwitchAdapterPlugin(MaiBotPlugin):
         self._client_factory = client_factory
         self._clock_ms = clock_ms
         self._start_background = start_background
-        self._client: Optional[SwitchClient] = None
+        self._client: Optional[MaiGOClient] = None
         self._tracker: Optional[SessionTracker] = None
         self._cache: Optional[ContextCacheStore] = None
         self._go_live: Optional[GoLiveAnnouncer] = None
@@ -61,16 +61,16 @@ class MaiSwitchAdapterPlugin(MaiBotPlugin):
         self._pending_tasks: set[asyncio.Task[Any]] = set()
         self._schema_mismatch_logged = False
 
-    def _build_client(self, cfg: SwitchAdapterConfig) -> SwitchClient:
+    def _build_client(self, cfg: MaiGOAdapterConfig) -> MaiGOClient:
         if self._client_factory is not None:
             return self._client_factory(cfg)
-        return HttpSwitchClient(
+        return HttpMaiGOClient(
             base_url=cfg.server.url,
             token=cfg.server.token,
             timeout_ms=cfg.server.request_timeout_ms,
         )
 
-    def _go_live_settings(self, cfg: SwitchAdapterConfig) -> GoLiveSettings:
+    def _go_live_settings(self, cfg: MaiGOAdapterConfig) -> GoLiveSettings:
         groups = tuple(dict.fromkeys(item.strip() for item in cfg.go_live.group_ids if item.strip()))
         return GoLiveSettings(
             group_ids=groups,
@@ -94,7 +94,7 @@ class MaiSwitchAdapterPlugin(MaiBotPlugin):
             clock_ms=self._clock_ms,
         )
         self._cache = ContextCacheStore(
-            self.ctx.paths.data_dir / "switch_cache.json",
+            self.ctx.paths.data_dir / "maigo_cache.json",
             logger=self.ctx.logger,
             clock_ms=self._clock_ms,
         )
@@ -108,7 +108,7 @@ class MaiSwitchAdapterPlugin(MaiBotPlugin):
         )
         self._go_live.load()
         if self._start_background and cfg.plugin.enabled and cfg.server.url.strip():
-            self._poll_task = asyncio.create_task(self._poll_loop(), name="maiswitch_adapter.poll")
+            self._poll_task = asyncio.create_task(self._poll_loop(), name="maigo_adapter.poll")
 
     async def on_unload(self) -> None:
         """停后台轮询、等待收尾上报任务并关闭连接。"""
@@ -160,7 +160,7 @@ class MaiSwitchAdapterPlugin(MaiBotPlugin):
             return
         exc = task.exception()
         if exc is not None:
-            self.ctx.logger.warning(f"MaiSwitch 插件后台任务 {task.get_name()} 失败: {exc}")
+            self.ctx.logger.warning(f"MaiGO 插件后台任务 {task.get_name()} 失败: {exc}")
 
     # ------------------------------------------------------------------
     # 入站追踪与出站自动采集
@@ -178,7 +178,7 @@ class MaiSwitchAdapterPlugin(MaiBotPlugin):
 
     @HookHandler(
         "send_service.after_send",
-        description="麦麦在白名单互通群或私聊成功回复后，异步按 visibility 上报至 MaiSwitch",
+        description="麦麦在白名单互通群或私聊成功回复后，异步按 visibility 上报至 MaiGO",
     )
     async def report_outbound_speech(self, **kwargs: Any) -> Dict[str, Any]:
         if not self.config.plugin.enabled or not kwargs.get("sent"):
@@ -220,7 +220,7 @@ class MaiSwitchAdapterPlugin(MaiBotPlugin):
             "summary": summary[:400],
             "verbatim": verbatim[:4000],
         }
-        self._spawn_background(self._send_events_safe([event_payload]), name="maiswitch_adapter.report_send")
+        self._spawn_background(self._send_events_safe([event_payload]), name="maigo_adapter.report_send")
         return {"action": "continue"}
 
     async def _send_events_safe(self, events: List[Dict[str, Any]]) -> None:
@@ -228,8 +228,8 @@ class MaiSwitchAdapterPlugin(MaiBotPlugin):
             return
         try:
             await self._client.post_events(events)
-        except SwitchClientError as exc:
-            self.ctx.logger.warning(f"出站发言上报 MaiSwitch 失败（本地不受影响）: {exc}")
+        except MaiGOClientError as exc:
+            self.ctx.logger.warning(f"出站发言上报 MaiGO 失败（本地不受影响）: {exc}")
 
     # ------------------------------------------------------------------
     # 规划与回复双钩子注入
@@ -277,15 +277,15 @@ class MaiSwitchAdapterPlugin(MaiBotPlugin):
                 )
                 cached = self._cache.apply_context_response(vis, raw)
                 actor_cards = [dict(card) for card in (raw.get("actor_cards") or ()) if isinstance(card, dict)]
-            except SwitchClientError as exc:
-                self.ctx.logger.warning(f"拉取 MaiSwitch 实时上下文失败，改用本地持久化缓存: {exc}")
+            except MaiGOClientError as exc:
+                self.ctx.logger.warning(f"拉取 MaiGO 实时上下文失败，改用本地持久化缓存: {exc}")
 
         new_items = list(items)
         if cached.stable_brief.strip():
             new_items = insert_stable_brief_item(
                 new_items,
                 cached.stable_brief,
-                item_id=f"maiswitch-stable-brief-{vis}",
+                item_id=f"maigo-stable-brief-{vis}",
             )
         dynamic_text = format_dynamic_block(
             live_context=cached.live_context,
@@ -297,7 +297,7 @@ class MaiSwitchAdapterPlugin(MaiBotPlugin):
             new_items = insert_dynamic_context_item(
                 new_items,
                 dynamic_text,
-                item_id=f"maiswitch-dynamic-context-{vis}",
+                item_id=f"maigo-dynamic-context-{vis}",
             )
         return {"action": "continue", "modified_kwargs": {**kwargs, "items": new_items}}
 
@@ -331,7 +331,7 @@ class MaiSwitchAdapterPlugin(MaiBotPlugin):
         if not snippets:
             return {"action": "continue"}
 
-        added = "<maiswitch-reply-context>\n" + "\n".join(snippets) + "\n</maiswitch-reply-context>"
+        added = "<maigo-reply-context>\n" + "\n".join(snippets) + "\n</maigo-reply-context>"
         existing = str(kwargs.get("extra_prompt") or "").strip()
         combined = f"{existing}\n\n{added}" if existing else added
         return {"action": "continue", "modified_kwargs": {**kwargs, "extra_prompt": combined}}
@@ -368,9 +368,9 @@ class MaiSwitchAdapterPlugin(MaiBotPlugin):
         ],
     )
     async def handle_recall_life(self, query: Any = "", days: Any = 7, limit: Any = 5, **kwargs: Any) -> Dict[str, Any]:
-        """按当前对话会话可见性调用 MaiSwitch 检索历史详情。"""
+        """按当前对话会话可见性调用 MaiGO 检索历史详情。"""
         if not self.config.plugin.enabled or self._client is None:
-            return {"success": False, "error": "MaiSwitch 跨端同步未启用"}
+            return {"success": False, "error": "MaiGO 跨端同步未启用"}
         cleaned_query = str(query or "").strip()
         if not cleaned_query:
             return {"success": False, "error": "请提供想要检索的关键词"}
@@ -401,9 +401,9 @@ class MaiSwitchAdapterPlugin(MaiBotPlugin):
                 target_visibility=target_vis,
             )
             return {"success": True, "content": text}
-        except SwitchClientError as exc:
-            self.ctx.logger.warning(f"recall_life 工具查询 MaiSwitch 失败: {exc}")
-            return {"success": False, "error": f"暂时连不上 MaiSwitch：{exc}"}
+        except MaiGOClientError as exc:
+            self.ctx.logger.warning(f"recall_life 工具查询 MaiGO 失败: {exc}")
+            return {"success": False, "error": f"暂时连不上 MaiGO：{exc}"}
 
     async def refresh_once(self) -> None:
         """执行一轮慢层与在播状态刷新，并检查是否满足跨端开播喊人条件。"""
@@ -431,8 +431,8 @@ class MaiSwitchAdapterPlugin(MaiBotPlugin):
                 for item in raw.get("active_sessions") or ():
                     if isinstance(item, dict) and item.get("checkout_id"):
                         merged_sessions[str(item["checkout_id"])] = dict(item)
-            except SwitchClientError as exc:
-                self.ctx.logger.warning(f"后台刷新 MaiSwitch {vis} 上下文缓存失败（保留本地缓存）: {exc}")
+            except MaiGOClientError as exc:
+                self.ctx.logger.warning(f"后台刷新 MaiGO {vis} 上下文缓存失败（保留本地缓存）: {exc}")
         if any_succeeded:
             self._cache.set_active_sessions(list(merged_sessions.values()))
         if self._go_live is not None:
@@ -443,10 +443,10 @@ class MaiSwitchAdapterPlugin(MaiBotPlugin):
             try:
                 await self.refresh_once()
             except Exception as exc:
-                self.ctx.logger.error(f"MaiSwitch 插件后台轮询异常: {exc}", exc_info=True)
+                self.ctx.logger.error(f"MaiGO 插件后台轮询异常: {exc}", exc_info=True)
             await asyncio.sleep(max(1.0, self.config.server.poll_interval_ms / 1000))
 
 
-def create_plugin() -> MaiSwitchAdapterPlugin:
+def create_plugin() -> MaiGOAdapterPlugin:
     """MaiBot 插件加载入口工厂。"""
-    return MaiSwitchAdapterPlugin()
+    return MaiGOAdapterPlugin()

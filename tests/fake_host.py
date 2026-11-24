@@ -1,4 +1,4 @@
-"""MaiBot-Switch-Adapter 测试用假 MaiBot 宿主。"""
+"""MaiBot-MaiGO-Adapter 测试用假 MaiBot 宿主。"""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from maibot_sdk import PluginContext, PluginPaths
 
 PLUGIN_DIR = Path(__file__).resolve().parents[1]
-PACKAGE_NAME = "maiswitch_adapter_under_test"
+PACKAGE_NAME = "maigo_adapter_under_test"
 
 WHITELIST_GROUP_ID = "10001"
 WHITELIST_STREAM_ID = "stream-group-10001"
@@ -64,9 +64,9 @@ class FakeHost:
         }
         self.trigger_calls: List[Dict[str, Any]] = []
         self.config: Dict[str, Any] = {"bot.nickname": "麦麦"}
-        self.data_dir = Path(tempfile.mkdtemp(prefix="maiswitch-adapter-test-"))
+        self.data_dir = Path(tempfile.mkdtemp(prefix="maigo-adapter-test-"))
 
-    def make_context(self, plugin_id: str = "maiswitch.switch-adapter") -> PluginContext:
+    def make_context(self, plugin_id: str = "maigo.maibot-adapter") -> PluginContext:
         paths = PluginPaths(data_dir=self.data_dir, runtime_dir=self.data_dir / "runtime")
         return PluginContext(plugin_id, rpc_call=self.rpc, paths=paths)
 

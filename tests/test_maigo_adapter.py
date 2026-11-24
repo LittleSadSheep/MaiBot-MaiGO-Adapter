@@ -1,4 +1,4 @@
-"""MaiBot-Switch-Adapter 完整行为与真实 HTTP 联调测试。"""
+"""MaiBot-MaiGO-Adapter 完整行为与真实 HTTP 联调测试。"""
 
 from __future__ import annotations
 
@@ -23,11 +23,11 @@ from tests.fake_host import (
 )
 
 plugin_mod = load_plugin_module()
-SwitchAdapterConfig = plugin_mod.SwitchAdapterConfig
+MaiGOAdapterConfig = plugin_mod.MaiGOAdapterConfig
 
 
-class _StubSwitchClient:
-    """可注入预设视图与离线故障的 SwitchClient 替身。"""
+class _StubMaiGOClient:
+    """可注入预设视图与离线故障的 MaiGOClient 替身。"""
 
     def __init__(self) -> None:
         self.posted_batches: List[List[Dict[str, Any]]] = []
@@ -83,7 +83,7 @@ class _StubSwitchClient:
 
     async def post_events(self, events: List[Dict[str, Any]]) -> Dict[str, Any]:
         if self.fail_network:
-            raise plugin_mod.SwitchClientError("network down")
+            raise plugin_mod.MaiGOClientError("network down")
         self.posted_batches.append(list(events))
         return {"ok": True, "accepted": len(events), "deduplicated": 0}
 
@@ -98,7 +98,7 @@ class _StubSwitchClient:
         include_topics: bool = True,
     ) -> Dict[str, Any]:
         if self.fail_network:
-            raise plugin_mod.SwitchClientError("network down")
+            raise plugin_mod.MaiGOClientError("network down")
         self.context_requests.append(
             {
                 "branch_id": branch_id,
@@ -129,7 +129,7 @@ class _StubSwitchClient:
         target_visibility: str = "public",
     ) -> str:
         if self.fail_network:
-            raise plugin_mod.SwitchClientError("network down")
+            raise plugin_mod.MaiGOClientError("network down")
         self.recall_calls.append({"query": query, "days": days, "limit": limit, "target_visibility": target_visibility})
         return self.recall_reply
 
@@ -146,7 +146,7 @@ def _make_config(
     server_url: str = "http://127.0.0.1:8768",
     token: str = "",
 ) -> Any:
-    return SwitchAdapterConfig.model_validate(
+    return MaiGOAdapterConfig.model_validate(
         {
             "plugin": {"enabled": True},
             "server": {"url": server_url, "token": token, "branch_id": "maibot"},
@@ -205,10 +205,8 @@ def _outbound_msg(*, session_id: str, message_id: str, text: str, is_notify: boo
 async def test_inbound_tracking_and_outbound_visibility_reporting() -> None:
     host = FakeHost()
     clock = ManualClock()
-    client = _StubSwitchClient()
-    plugin = plugin_mod.MaiSwitchAdapterPlugin(
-        client_factory=lambda _cfg: client, clock_ms=clock, start_background=False
-    )
+    client = _StubMaiGOClient()
+    plugin = plugin_mod.MaiGOAdapterPlugin(client_factory=lambda _cfg: client, clock_ms=clock, start_background=False)
     plugin._ctx = host.make_context()
     plugin._plugin_config_instance = _make_config()
     await plugin.on_load()
@@ -291,10 +289,8 @@ async def test_inbound_tracking_and_outbound_visibility_reporting() -> None:
 async def test_planner_two_layer_injection_replyer_and_non_whitelist_isolation() -> None:
     host = FakeHost()
     clock = ManualClock()
-    client = _StubSwitchClient()
-    plugin = plugin_mod.MaiSwitchAdapterPlugin(
-        client_factory=lambda _cfg: client, clock_ms=clock, start_background=False
-    )
+    client = _StubMaiGOClient()
+    plugin = plugin_mod.MaiGOAdapterPlugin(client_factory=lambda _cfg: client, clock_ms=clock, start_background=False)
     plugin._ctx = host.make_context()
     plugin._plugin_config_instance = _make_config()
     await plugin.on_load()
@@ -318,12 +314,12 @@ async def test_planner_two_layer_injection_replyer_and_non_whitelist_isolation()
         new_items = res["modified_kwargs"]["items"]
         # 慢层插在 SystemMessageItem 之后（下标 1），动态层插在末尾指令项之前（下标 -2）
         assert len(new_items) == 5
-        assert "<maiswitch-life-brief>" in new_items[1]["parts"][0]["text"]
+        assert "<maigo-life-brief>" in new_items[1]["parts"][0]["text"]
         assert "手工粘土视频" in new_items[1]["parts"][0]["text"]
         assert "私下说过不想公开的小事" not in new_items[1]["parts"][0]["text"]
 
         dynamic_text = new_items[-2]["parts"][0]["text"]
-        assert "<maiswitch-context>" in dynamic_text
+        assert "<maigo-context>" in dynamic_text
         assert "老熟人甲" in dynamic_text
         assert "新灯塔" in dynamic_text
         assert new_items[-1]["parts"][0]["text"] == "当前时刻指令"
@@ -347,7 +343,7 @@ async def test_planner_two_layer_injection_replyer_and_non_whitelist_isolation()
         # 回复前置勾子保留现有 extra_prompt 并追加
         rep = await plugin.inject_into_replyer(session_id=WHITELIST_STREAM_ID, extra_prompt="保持俏皮语气")
         combined = rep["modified_kwargs"]["extra_prompt"]
-        assert combined.startswith("保持俏皮语气") and "<maiswitch-reply-context>" in combined
+        assert combined.startswith("保持俏皮语气") and "<maigo-reply-context>" in combined
         assert "今晚在 MC 建一座新灯塔" in combined
 
         # 离线场景退回本地已持久化缓存继续可用，绝不抛异常
@@ -363,10 +359,8 @@ async def test_planner_two_layer_injection_replyer_and_non_whitelist_isolation()
 async def test_go_live_delay_announcement_and_persistence() -> None:
     host = FakeHost()
     clock = ManualClock(start_ms=10_000_000)
-    client = _StubSwitchClient()
-    plugin = plugin_mod.MaiSwitchAdapterPlugin(
-        client_factory=lambda _cfg: client, clock_ms=clock, start_background=False
-    )
+    client = _StubMaiGOClient()
+    plugin = plugin_mod.MaiGOAdapterPlugin(client_factory=lambda _cfg: client, clock_ms=clock, start_background=False)
     plugin._ctx = host.make_context()
     plugin._plugin_config_instance = _make_config(notify_groups=[NOTIFY_GROUP_ID], delay_ms=300_000)
     await plugin.on_load()
@@ -401,7 +395,7 @@ async def test_go_live_delay_announcement_and_persistence() -> None:
 
         # 重启插件实例再刷同一场次，因 go_live_announced.json 落盘，不会重复喊人
         await plugin.on_unload()
-        plugin2 = plugin_mod.MaiSwitchAdapterPlugin(
+        plugin2 = plugin_mod.MaiGOAdapterPlugin(
             client_factory=lambda _cfg: client, clock_ms=clock, start_background=False
         )
         plugin2._ctx = host.make_context()
@@ -415,7 +409,7 @@ async def test_go_live_delay_announcement_and_persistence() -> None:
 
 
 async def test_recall_life_tool_and_real_http_loopback_server() -> None:
-    # 1. 先起一个轻量标准库环回 HTTP 服务器验证 HttpSwitchClient 真实鉴权与 JSON 通信
+    # 1. 先起一个轻量标准库环回 HTTP 服务器验证 HttpMaiGOClient 真实鉴权与 JSON 通信
     server_hits: List[str] = []
 
     class _LoopbackHandler(BaseHTTPRequestHandler):
@@ -457,7 +451,7 @@ async def test_recall_life_tool_and_real_http_loopback_server() -> None:
     thread.start()
 
     host = FakeHost()
-    plugin = plugin_mod.MaiSwitchAdapterPlugin(start_background=False)
+    plugin = plugin_mod.MaiGOAdapterPlugin(start_background=False)
     plugin._ctx = host.make_context()
     plugin._plugin_config_instance = _make_config(
         server_url=f"http://127.0.0.1:{port}", token="real-tok", sync_private=True
@@ -493,6 +487,6 @@ async def test_recall_life_tool_and_real_http_loopback_server() -> None:
     await plugin.on_load()
     try:
         err_res = await plugin.handle_recall_life(query="灯塔")
-        assert err_res["success"] is False and "连不上 MaiSwitch" in err_res["error"]
+        assert err_res["success"] is False and "连不上 MaiGO" in err_res["error"]
     finally:
         await plugin.on_unload()
