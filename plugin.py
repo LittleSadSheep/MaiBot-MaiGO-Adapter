@@ -10,6 +10,7 @@ import uuid
 from maibot_sdk import HookHandler, MaiBotPlugin, Tool
 from maibot_sdk.types import ToolParameterInfo, ToolParamType
 
+from .backfill import HistoryBackfiller
 from .config import MaiGOAdapterConfig
 from .context_cache import (
     ContextCacheStore,
@@ -57,7 +58,9 @@ class MaiGOAdapterPlugin(MaiBotPlugin):
         self._tracker: Optional[SessionTracker] = None
         self._cache: Optional[ContextCacheStore] = None
         self._go_live: Optional[GoLiveAnnouncer] = None
+        self._backfiller: Optional[HistoryBackfiller] = None
         self._poll_task: Optional[asyncio.Task[None]] = None
+        self._backfill_task: Optional[asyncio.Task[int]] = None
         self._pending_tasks: set[asyncio.Task[Any]] = set()
         self._schema_mismatch_logged = False
 
@@ -107,18 +110,35 @@ class MaiGOAdapterPlugin(MaiBotPlugin):
             clock_ms=self._clock_ms,
         )
         self._go_live.load()
+        self._backfiller = HistoryBackfiller(
+            data_dir=self.ctx.paths.data_dir,
+            client=self._client,
+            logger=self.ctx.logger,
+            branch_id=(cfg.server.branch_id or "maibot").strip().lower(),
+            platform=cfg.scope.platform,
+            group_ids=cfg.scope.group_ids,
+            sync_private=cfg.scope.sync_private,
+            days=cfg.backfill.days,
+            min_chars=cfg.backfill.min_chars,
+            batch_size=cfg.backfill.batch_size,
+            batch_interval_ms=cfg.backfill.batch_interval_ms,
+            db_path=cfg.backfill.db_path,
+            clock_ms=self._clock_ms,
+        )
         if self._start_background and cfg.plugin.enabled and cfg.server.url.strip():
             self._poll_task = asyncio.create_task(self._poll_loop(), name="maigo_adapter.poll")
 
     async def on_unload(self) -> None:
         """停后台轮询、等待收尾上报任务并关闭连接。"""
-        if self._poll_task is not None:
-            self._poll_task.cancel()
-            try:
-                await self._poll_task
-            except asyncio.CancelledError:
-                pass
-            self._poll_task = None
+        for bg in (self._poll_task, self._backfill_task):
+            if bg is not None and not bg.done():
+                bg.cancel()
+                try:
+                    await bg
+                except asyncio.CancelledError:
+                    pass
+        self._poll_task = None
+        self._backfill_task = None
         await self.flush_pending_tasks()
         if self._client is not None:
             await self._client.close()
@@ -141,6 +161,19 @@ class MaiGOAdapterPlugin(MaiBotPlugin):
         if self._client is not None:
             await self._client.close()
         self._client = self._build_client(cfg)
+        if self._backfiller is not None:
+            self._backfiller.update_settings(
+                client=self._client,
+                branch_id=(cfg.server.branch_id or "maibot").strip().lower(),
+                platform=cfg.scope.platform,
+                group_ids=cfg.scope.group_ids,
+                sync_private=cfg.scope.sync_private,
+                days=cfg.backfill.days,
+                min_chars=cfg.backfill.min_chars,
+                batch_size=cfg.backfill.batch_size,
+                batch_interval_ms=cfg.backfill.batch_interval_ms,
+                db_path=cfg.backfill.db_path,
+            )
 
     async def flush_pending_tasks(self) -> None:
         """等待在途的异步事件上报任务全部结束（卸载与确定性测试使用）。"""
@@ -435,8 +468,24 @@ class MaiGOAdapterPlugin(MaiBotPlugin):
                 self.ctx.logger.warning(f"后台刷新 MaiGO {vis} 上下文缓存失败（保留本地缓存）: {exc}")
         if any_succeeded:
             self._cache.set_active_sessions(list(merged_sessions.values()))
+            self._maybe_start_backfill()
         if self._go_live is not None:
             await self._go_live.observe_and_tick(self._cache.active_sessions)
+
+    async def run_history_backfill_once(self) -> int:
+        """执行一轮历史对话回填（供测试确定性调用与人工触发）。"""
+        if not self.config.plugin.enabled or not self.config.backfill.enabled or self._backfiller is None:
+            return 0
+        return await self._backfiller.run_once()
+
+    def _maybe_start_backfill(self) -> None:
+        if not self.config.backfill.enabled or self._backfiller is None:
+            return
+        if self._backfill_task is not None and not self._backfill_task.done():
+            return
+        if not self._backfiller.has_pending_scopes():
+            return
+        self._backfill_task = asyncio.create_task(self._backfiller.run_once(), name="maigo_adapter.backfill")
 
     async def _poll_loop(self) -> None:
         while True:

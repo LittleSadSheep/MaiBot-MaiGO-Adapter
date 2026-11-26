@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import sqlite3
 import threading
 from typing import Any, Dict, List
 from urllib.parse import parse_qs, urlparse
@@ -488,5 +489,75 @@ async def test_recall_life_tool_and_real_http_loopback_server() -> None:
     try:
         err_res = await plugin.handle_recall_life(query="灯塔")
         assert err_res["success"] is False and "连不上 MaiGO" in err_res["error"]
+    finally:
+        await plugin.on_unload()
+
+
+async def test_startup_history_backfill_scope_filtering_and_new_group_incremental() -> None:
+    host = FakeHost()
+    now_ms = 1_795_660_000_000
+    ts_sec = (now_ms - 86_400_000) / 1000.0
+    # 模拟真实的 MaiBot/data/MaiBot.db 与 MaiBot/data/plugins/<id> 目录层级
+    db_file = host.data_dir / "MaiBot.db"
+    conn = sqlite3.connect(db_file)
+    conn.executescript(
+        """
+        CREATE TABLE bot_platform_accounts (id INTEGER PRIMARY KEY, platform TEXT, account_id TEXT);
+        CREATE TABLE mai_messages (
+            id INTEGER PRIMARY KEY, message_id TEXT, timestamp REAL, platform TEXT, scope TEXT,
+            user_id TEXT, group_id TEXT, group_name TEXT, session_id TEXT,
+            is_emoji INTEGER, is_picture INTEGER, is_command INTEGER, is_notify INTEGER,
+            processed_plain_text TEXT, raw_content TEXT
+        );
+        """
+    )
+    conn.execute("INSERT INTO bot_platform_accounts VALUES (1, 'qq', 'bot-self-1')")
+    rows = [
+        ("m-g1", ts_sec, "qq", "group", "bot-self-1", WHITELIST_GROUP_ID, WHITELIST_GROUP_NAME, WHITELIST_STREAM_ID, 0, 0, 0, 0, "昨天在互通群里聊过新工程计划", ""),
+        ("m-peer", ts_sec + 5, "qq", "group", "peer-2", WHITELIST_GROUP_ID, WHITELIST_GROUP_NAME, WHITELIST_STREAM_ID, 0, 0, 0, 0, "群友发言不应入账为麦麦本人", ""),
+        ("m-non", ts_sec + 10, "qq", "group", NON_WHITELIST_GROUP_ID, NON_WHITELIST_GROUP_ID, "非白名单群", NON_WHITELIST_STREAM_ID, 0, 0, 0, 0, "非白名单群发言不能外泄", ""),
+        ("m-g2", ts_sec + 15, "qq", "group", "bot-self-1", NOTIFY_GROUP_ID, "新群二号", NOTIFY_STREAM_ID, 0, 0, 0, 0, "新加白名单群里以前聊过的话", ""),
+        ("m-priv", ts_sec + 20, "qq", "private", "bot-self-1", "", "", PRIVATE_STREAM_ID, 0, 0, 0, 0, "私聊答应留意一下近况", ""),
+        ("m-short", ts_sec + 25, "qq", "group", "bot-self-1", WHITELIST_GROUP_ID, WHITELIST_GROUP_NAME, WHITELIST_STREAM_ID, 0, 0, 0, 0, "好的", ""),
+        ("m-emoji", ts_sec + 30, "qq", "group", "bot-self-1", WHITELIST_GROUP_ID, WHITELIST_GROUP_NAME, WHITELIST_STREAM_ID, 1, 0, 0, 0, "[表情]哈哈哈哈", ""),
+        ("m-console", ts_sec + 35, "bot_console", "private", "bot-self-1", "", "", "console-1", 0, 0, 0, 0, "控制台调试句子不应该上传", ""),
+    ]
+    conn.executemany(
+        "INSERT INTO mai_messages (message_id, timestamp, platform, scope, user_id, group_id, group_name, session_id, is_emoji, is_picture, is_command, is_notify, processed_plain_text, raw_content) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        rows,
+    )
+    conn.commit()
+    conn.close()
+
+    # 将插件数据目录放在 MaiBot/data/plugins/<id> 下，验证默认自动定位上级 MaiBot.db
+    plugin_data_dir = host.data_dir / "plugins" / "maigo.maibot-adapter"
+    plugin_data_dir.mkdir(parents=True, exist_ok=True)
+    host.data_dir = plugin_data_dir
+
+    stub = _StubMaiGOClient()
+    plugin = plugin_mod.MaiGOAdapterPlugin(client_factory=lambda _cfg: stub, clock_ms=lambda: now_ms, start_background=False)
+    plugin._ctx = host.make_context()
+    plugin._plugin_config_instance = _make_config(group_ids=[WHITELIST_GROUP_ID], sync_private=True)
+    await plugin.on_load()
+
+    try:
+        sent = await plugin.run_history_backfill_once()
+        assert sent == 2
+        first_events = [ev for batch in stub.posted_batches for ev in batch]
+        assert [ev["visibility"] for ev in first_events] == ["group", "private"]
+        assert "新工程计划" in first_events[0]["verbatim"]
+        assert "留意一下近况" in first_events[1]["verbatim"]
+
+        # 再次执行不重复补推
+        assert await plugin.run_history_backfill_once() == 0
+
+        # 白名单新增第二个群后，仅增量补推该群历史对话
+        stub.posted_batches.clear()
+        plugin._plugin_config_instance = _make_config(group_ids=[WHITELIST_GROUP_ID, NOTIFY_GROUP_ID], sync_private=True)
+        await plugin.on_config_update("self", {}, "0.1.0")
+        inc = await plugin.run_history_backfill_once()
+        assert inc == 1
+        second_events = [ev for batch in stub.posted_batches for ev in batch]
+        assert len(second_events) == 1 and "新群二号" in second_events[0]["summary"]
     finally:
         await plugin.on_unload()

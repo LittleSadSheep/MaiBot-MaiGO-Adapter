@@ -98,6 +98,19 @@ class GoLiveNotifyConfig(PluginConfigBase):
     )
 
 
+class BackfillConfig(PluginConfigBase):
+    """首次连通或新增白名单群聊时的低速历史对话回填配置。"""
+
+    __ui_label__ = "历史回填"
+
+    enabled: bool = Field(default=True, description="首次连通 MaiGO 时是否在后台低速回填近期高信噪比本人回复")
+    days: int = Field(default=30, ge=0, le=365, description="首次回填覆盖最近几天（0 表示不限天数）")
+    min_chars: int = Field(default=6, ge=1, le=200, description="忽略过短水词回复的最少字符数")
+    batch_size: int = Field(default=20, ge=1, le=100, description="每批上报事件条数")
+    batch_interval_ms: int = Field(default=1_000, ge=0, le=60_000, description="批次间低速间隔（毫秒）")
+    db_path: str = Field(default="", description="显式指定 MaiBot.db 路径；留空自动向上定位")
+
+
 class MaiGOAdapterConfig(PluginConfigBase):
     """MaiBot-MaiGO-Adapter 顶层配置根。"""
 
@@ -106,3 +119,4 @@ class MaiGOAdapterConfig(PluginConfigBase):
     scope: ScopeConfig = Field(default_factory=ScopeConfig)
     injection: InjectionConfig = Field(default_factory=InjectionConfig)
     go_live: GoLiveNotifyConfig = Field(default_factory=GoLiveNotifyConfig)
+    backfill: BackfillConfig = Field(default_factory=BackfillConfig)
