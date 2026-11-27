@@ -143,6 +143,14 @@ async def test_planner_auto_prerecall_routing_note_and_thin_replyer_injection() 
         assert "今晚在 MC 建一座新灯塔" in rep_prompt
         assert "在B站刷到手工粘土视频" not in rep_prompt
 
+        # 工具调用 recall_life 必须声明顶层可见（不藏在 tool_search 延迟工具里），且默认预算覆盖云端向量延迟
+        assert plugin.config.injection.pre_recall_timeout_ms == 1_800
+        tool_meta = getattr(plugin.handle_recall_life, "__maibot_tool__", None) or getattr(
+            plugin_mod.MaiGOAdapterPlugin.handle_recall_life, "_component_info", None
+        )
+        if tool_meta is not None and hasattr(tool_meta, "metadata"):
+            assert tool_meta.metadata.get("visibility") == "visible"
+
         # 工具调用 recall_life 支持 days=0 全量历史并携带 branch_id
         tool_res = await plugin.handle_recall_life(
             query="远古残骸", days=0, limit=3, group_id=WHITELIST_GROUP_ID, platform="qq"

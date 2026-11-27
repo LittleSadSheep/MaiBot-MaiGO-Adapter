@@ -334,23 +334,32 @@ class MaiGOAdapterPlugin(MaiBotPlugin):
             except MaiGOClientError as exc:
                 self.ctx.logger.warning(f"拉取 MaiGO 实时上下文失败，改用本地持久化缓存: {exc}")
 
-            # 双保险自动预召回：仅对有效提问以短超时查强命中跨端细节，未命中或超时静默跳过不拖慢主链
+            # 双保险自动预召回：仅对有效提问查强命中跨端细节，记录命中/超时日志方便排查且不阻塞主链
             query_text = self._tracker.last_inbound_query(session_id)
             if self.config.injection.pre_recall_enabled and is_pre_recall_candidate_query(query_text):
+                t0 = time.perf_counter()
                 try:
                     pre_recalled = (
                         await self._client.recall_life(
                             query=query_text[:120],
                             days=0,
-                            limit=3,
+                            limit=4,
                             target_visibility=vis,
                             branch_id=branch_id,
                             high_confidence_only=True,
                             timeout_ms=self.config.injection.pre_recall_timeout_ms,
                         )
                     ).strip()
+                    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+                    if pre_recalled:
+                        self.ctx.logger.info(
+                            f"规划前置自动预召回命中（{elapsed_ms}ms，{len(pre_recalled)} 字）: query={query_text[:30]!r}"
+                        )
                 except MaiGOClientError as exc:
-                    self.ctx.logger.debug(f"规划前置自动预召回跳过（不阻塞主链）: {exc}")
+                    elapsed_ms = int((time.perf_counter() - t0) * 1000)
+                    self.ctx.logger.warning(
+                        f"规划前置自动预召回跳过（{elapsed_ms}ms / 上限 {self.config.injection.pre_recall_timeout_ms}ms）: {exc}"
+                    )
 
         if pre_recalled:
             self._last_pre_recall[session_id] = (self._clock_ms(), pre_recalled)
@@ -431,31 +440,34 @@ class MaiGOAdapterPlugin(MaiBotPlugin):
     @Tool(
         "recall_life",
         description=(
-            "深度翻查你在各个地方（历次直播、MC 存档进展、B 站见闻、QQ 群、跨端熟人）的原件细节、观点与待办约定。"
-            "有人问起往期直播细节、游戏里造过什么或之前刷到过什么内容时优先调用；需要查超过 30 天的历史可传 days=0。"
+            "深度翻查你在各个地方（历次直播、MC 存档进展、女仆与建房记录、B 站见闻、QQ 群、跨端熟人）的原件细节、观点与待办约定。"
+            "有人问起往期直播细节、游戏里发生过什么、建过什么或有几位同伴时，直接调用本工具并用简洁实体关键词检索（如「女仆」「房子」「水晶装配器」）；"
+            "查全部历史传 days=0。"
         ),
         parameters=[
             ToolParameterInfo(
                 name="query",
                 param_type=ToolParamType.STRING,
-                description="想要回想的关键词或主题（例如「晶体装配器」「下界 远古残骸」）",
+                description="简洁的核心实体关键词或主题（例如「女仆」「房子」「水晶装配器」「下界 远古残骸」）",
                 required=True,
             ),
             ToolParameterInfo(
                 name="days",
                 param_type=ToolParamType.INTEGER,
-                description="往前检索几天，默认 30；传 0 表示不限天数翻查全部历史",
+                description="往前检索几天，默认 0 表示翻查全部历史；查近况可传 7 或 30",
                 required=False,
             ),
             ToolParameterInfo(
                 name="limit",
                 param_type=ToolParamType.INTEGER,
-                description="最多返回几条结果，默认 5",
+                description="最多返回几条结果，默认 6",
                 required=False,
             ),
         ],
+        # 显式声明顶层可见，与 query_memory 并列直接暴露给 Planner，避免走 deferred/tool_search 导致模型无法直接调用
+        visibility="visible",
     )
-    async def handle_recall_life(self, query: Any = "", days: Any = 30, limit: Any = 5, **kwargs: Any) -> Dict[str, Any]:
+    async def handle_recall_life(self, query: Any = "", days: Any = 0, limit: Any = 6, **kwargs: Any) -> Dict[str, Any]:
         """按当前对话会话可见性调用 MaiGO 检索跨端原件书库与历史详情。"""
         if not self.config.plugin.enabled or self._client is None:
             return {"success": False, "error": "MaiGO 跨端同步未启用"}
@@ -463,9 +475,9 @@ class MaiGOAdapterPlugin(MaiBotPlugin):
         if not cleaned_query:
             return {"success": False, "error": "请提供想要检索的关键词"}
         try:
-            raw_days = 30 if days is None else int(days)
+            raw_days = 0 if days is None else int(days)
             days_int = max(0, min(365, raw_days))
-            limit_int = max(1, min(20, int(limit or 5)))
+            limit_int = max(1, min(20, int(limit or 6)))
         except (TypeError, ValueError):
             return {"success": False, "error": "days 与 limit 必须是整数"}
 
@@ -483,6 +495,7 @@ class MaiGOAdapterPlugin(MaiBotPlugin):
                     target_vis = resolved
 
         branch_id = (self.config.server.branch_id or "maibot").strip().lower()
+        t0 = time.perf_counter()
         try:
             text = await self._client.recall_life(
                 query=cleaned_query,
@@ -490,6 +503,10 @@ class MaiGOAdapterPlugin(MaiBotPlugin):
                 limit=limit_int,
                 target_visibility=target_vis,
                 branch_id=branch_id,
+            )
+            elapsed_ms = int((time.perf_counter() - t0) * 1000)
+            self.ctx.logger.info(
+                f"recall_life 工具查询完成（{elapsed_ms}ms，vis={target_vis}，返回 {len(text)} 字）: query={cleaned_query[:40]!r}"
             )
             return {"success": True, "content": text}
         except MaiGOClientError as exc:

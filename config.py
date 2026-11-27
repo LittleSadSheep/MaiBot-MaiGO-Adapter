@@ -73,10 +73,10 @@ class InjectionConfig(PluginConfigBase):
     include_topics: bool = Field(default=True, description="是否在群聊动态上下文中附上未聊过的鲜活话头")
     pre_recall_enabled: bool = Field(default=True, description="规划前是否对当前消息做短超时高置信度跨端预召回")
     pre_recall_timeout_ms: int = Field(
-        default=400,
+        default=1_800,
         ge=100,
         le=5_000,
-        description="规划前置自动预召回的单次超时预算（毫秒，超时静默放行不阻塞主链）",
+        description="规划前置自动预召回的单次超时预算（毫秒，覆盖云端向量检索 RTT，超时静默放行不阻塞主链）",
     )
     replyer_max_chars: int = Field(
         default=600,
