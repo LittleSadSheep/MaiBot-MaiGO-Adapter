@@ -124,9 +124,10 @@ async def test_planner_auto_prerecall_routing_note_and_thin_replyer_injection() 
         res = await plugin.inject_into_planner(session_id=WHITELIST_STREAM_ID, items=items, item_schema_version=1)
         new_items = res["modified_kwargs"]["items"]
 
-        # 慢层稳定位固定包含 recall_life 与 query_memory 分工提示
+        # 慢层稳定位固定包含 recall_life 与 query_memory 分工提示，且明确告知无需走 tool_search
         stable_text = new_items[1]["parts"][0]["text"]
         assert "recall_life" in stable_text and "query_memory" in stable_text
+        assert "无需再用 tool_search" in stable_text
 
         # 自动预召回以 days=0 / high_confidence_only=True / branch_id=maibot 触发并注入动态块
         assert len(client.recall_calls) == 1

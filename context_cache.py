@@ -395,7 +395,7 @@ def insert_stable_brief_item(items: List[Any], text: str, *, item_id: str = "mai
         "【记忆检索分工】\n"
         "- 本地 query_memory 仅覆盖当前群聊记录，不包含你的直播、MC 存档或 B 站经历；\n"
         "- 凡涉及往期直播细节、游戏存档进展、B 站见闻或上方未展开的历史事项，"
-        "请先通过 tool_search 加载并调用 recall_life（查 30 天以上全量历史可传 days=0）查证后再答，切勿靠猜。\n"
+        "请直接调用已在可用工具列表中的 recall_life 工具（查全部历史传 days=0，无需再用 tool_search 搜索它）查证后再答，切勿靠猜。\n"
         "</maigo-life-brief>"
     )
     new_items.insert(pos, build_context_item(wrapped, item_id=item_id, stable=True))
