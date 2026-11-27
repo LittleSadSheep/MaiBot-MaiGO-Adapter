@@ -12,6 +12,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from .maigo_client import MaiGOClient, MaiGOClientError
+from .speech_buffer import is_low_signal_outbound
 
 _SPACE_RE = re.compile(r"\s+")
 
@@ -208,7 +209,7 @@ class HistoryBackfiller:
                 text = _clean_text(
                     _row_val(row, mcols, "processed_plain_text") or _row_val(row, mcols, "raw_content"), max_len=1200
                 )
-                if len(text) < self._min_chars:
+                if len(text) < self._min_chars or is_low_signal_outbound(text, min_chars=self._min_chars):
                     continue
                 occ_ms = _to_ms(_row_val(row, mcols, "timestamp") or _row_val(row, mcols, "received_at"), now_ms)
                 if cutoff_ms > 0 and occ_ms < cutoff_ms:

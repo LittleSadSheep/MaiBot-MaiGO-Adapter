@@ -33,9 +33,12 @@ class MaiGOClient(Protocol):
         self,
         *,
         query: str,
-        days: int = 7,
+        days: int = 30,
         limit: int = 5,
         target_visibility: str = "public",
+        branch_id: str = "",
+        high_confidence_only: bool = False,
+        timeout_ms: Optional[int] = None,
     ) -> str: ...
 
     async def close(self) -> None: ...
@@ -128,24 +131,30 @@ class HttpMaiGOClient:
         self,
         *,
         query: str,
-        days: int = 7,
+        days: int = 30,
         limit: int = 5,
         target_visibility: str = "public",
+        branch_id: str = "",
+        high_confidence_only: bool = False,
+        timeout_ms: Optional[int] = None,
     ) -> str:
-        """调用 HTTP 经历检索口，按目标可见性返回与关键字相关的跨端事件与立场。"""
+        """调用 HTTP 经历检索口，按目标可见性返回与关键字相关的跨端原件、关系与立场。"""
         if not self._base_url:
             raise MaiGOClientError("MaiGO 服务端地址未配置")
         client = self._get_client()
+        params: Dict[str, Any] = {
+            "query": query,
+            "days": int(days),
+            "limit": int(limit),
+            "target_visibility": target_visibility,
+        }
+        if branch_id.strip():
+            params["branch_id"] = branch_id.strip()
+        if high_confidence_only:
+            params["high_confidence_only"] = "true"
+        req_timeout = max(0.1, timeout_ms / 1000.0) if timeout_ms is not None else self._timeout_s
         try:
-            resp = await client.get(
-                "/api/v1/views/recall",
-                params={
-                    "query": query,
-                    "days": int(days),
-                    "limit": int(limit),
-                    "target_visibility": target_visibility,
-                },
-            )
+            resp = await client.get("/api/v1/views/recall", params=params, timeout=req_timeout)
             resp.raise_for_status()
             data = resp.json()
             return str(data.get("text") or "") if isinstance(data, dict) else ""

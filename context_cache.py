@@ -93,6 +93,7 @@ class SessionTracker:
         self._session_groups: Dict[str, str] = {}
         self._recent_actors: Dict[str, List[TrackedActor]] = {}
         self._last_inbound_summary: Dict[str, str] = {}
+        self._last_inbound_raw: Dict[str, str] = {}
         self.update_settings(platform=platform, group_ids=group_ids, sync_private=sync_private)
 
     def update_settings(self, *, platform: str, group_ids: Sequence[str], sync_private: bool) -> None:
@@ -138,6 +139,9 @@ class SessionTracker:
         now = self._clock_ms()
         if text and not forgotten:
             self._last_inbound_summary[session_id] = f"{display_name or '群友'}说「{text[:80]}」"
+            self._last_inbound_raw[session_id] = text[:160]
+        elif forgotten:
+            self._last_inbound_raw.pop(session_id, None)
         bucket = self._recent_actors.setdefault(session_id, [])
         bucket = [a for a in bucket if not (a.platform == platform and a.external_id == uid)]
         bucket.insert(
@@ -202,6 +206,10 @@ class SessionTracker:
     def last_inbound_hint(self, session_id: str) -> str:
         """返回该会话最近一句有效入站摘要（用于出站事件上下文概括）。"""
         return self._last_inbound_summary.get(session_id, "")
+
+    def last_inbound_query(self, session_id: str) -> str:
+        """返回该会话最近一句未遗忘入站纯文本（用于规划前置高置信度跨端预召回）。"""
+        return self._last_inbound_raw.get(session_id, "")
 
     async def _resolve_missing_groups(self) -> None:
         now = self._clock_ms()
@@ -383,7 +391,11 @@ def insert_stable_brief_item(items: List[Any], text: str, *, item_id: str = "mai
     wrapped = (
         "<maigo-life-brief>\n"
         "以下是关于你自己的跨端生活背景与长期记忆（今天经历与近期表态）：\n"
-        f"{text.strip()}\n"
+        f"{text.strip()}\n\n"
+        "【记忆检索分工】\n"
+        "- 本地 query_memory 仅覆盖当前群聊记录，不包含你的直播、MC 存档或 B 站经历；\n"
+        "- 凡涉及往期直播细节、游戏存档进展、B 站见闻或上方未展开的历史事项，"
+        "请先通过 tool_search 加载并调用 recall_life（查 30 天以上全量历史可传 days=0）查证后再答，切勿靠猜。\n"
         "</maigo-life-brief>"
     )
     new_items.insert(pos, build_context_item(wrapped, item_id=item_id, stable=True))
@@ -406,11 +418,17 @@ def format_dynamic_block(
     actor_cards: Sequence[Dict[str, Any]] = (),
     fresh_topics: Sequence[Dict[str, Any]] = (),
     open_promises: Sequence[Dict[str, Any]] = (),
+    pre_recalled: str = "",
 ) -> str:
-    """将快层动态信息格式化为防串话、防当众开盒的参考块。"""
+    """将快层动态信息与高置信度预召回细节格式化为防串话、防当众开盒的参考块。"""
     sections: List[str] = []
     if live_context.strip():
         sections.append(f"当前动态与刚发生的跨端事件：\n{live_context.strip()}")
+    if pre_recalled.strip():
+        sections.append(
+            "【顺手想起来的跨端细节】（已核实历史记录，答复时可直接自然引用，勿与上面内容矛盾）：\n"
+            f"{pre_recalled.strip()}"
+        )
     if actor_cards:
         lines = ["在场可识别的跨端熟人（仅基于可公开关联，不要当众点破对方其他平台账号或未公开隐私）："]
         for card in actor_cards:

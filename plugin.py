@@ -22,8 +22,10 @@ from .context_cache import (
 )
 from .go_live import GoLiveAnnouncer, GoLiveSettings
 from .maigo_client import HttpMaiGOClient, MaiGOClient, MaiGOClientError
+from .speech_buffer import SpeechWindowBuffer, is_pre_recall_candidate_query
 
 _CONTEXT_ITEM_SCHEMA_VERSION = 1
+_PRE_RECALL_CACHE_TTL_MS = 60_000
 
 
 def _default_now_ms() -> int:
@@ -34,11 +36,12 @@ class MaiGOAdapterPlugin(MaiBotPlugin):
     """零侵入对接 MaiGO 的 MaiBot 轻量适配器插件。
 
     职责边界：
-    1. 入站监听 ``chat.receive.after_process`` 追踪会话作用域与近期发言人；
-    2. 出站监听 ``send_service.after_send``，仅将白名单群（``group``）与私聊（``private``）里
-       麦麦本人实际发出的回复异步上报给 ``POST /api/v1/events``；
-    3. 规划前置与回复前置钩子按作用域注入慢层稳定简报、快层实时态、脱敏熟人名片与鲜活话头；
-    4. 定时刷新本地缓存，监听其他端稳定开播并在通知群延迟喊人，暴露 ``recall_life`` 工具供按需检索。
+    1. 入站监听 ``chat.receive.after_process`` 追踪会话作用域、近期发言人与当前提问正文；
+    2. 出站监听 ``send_service.after_send``，经窗口归并缓冲器过滤命令回执与水词后，
+       将白名单群（``group``）与私聊（``private``）的高信噪比对话段异步上报给 ``POST /api/v1/events``；
+    3. 规划前置注入带工具分工说明的慢层简报、高置信度短超时自动预召回与快层动态上下文；
+       回复前置改走精简注入（动态近况 + 最多 3 条约定 + 本轮预召回），避免重复堆砌慢层；
+    4. 定时刷新本地缓存，监听其他端稳定开播并在通知群延迟喊人，暴露 ``recall_life`` 工具供深度翻查。
     """
 
     config_model = MaiGOAdapterConfig
@@ -59,6 +62,8 @@ class MaiGOAdapterPlugin(MaiBotPlugin):
         self._cache: Optional[ContextCacheStore] = None
         self._go_live: Optional[GoLiveAnnouncer] = None
         self._backfiller: Optional[HistoryBackfiller] = None
+        self._speech_buffer: Optional[SpeechWindowBuffer] = None
+        self._last_pre_recall: Dict[str, tuple[int, str]] = {}
         self._poll_task: Optional[asyncio.Task[None]] = None
         self._backfill_task: Optional[asyncio.Task[int]] = None
         self._pending_tasks: set[asyncio.Task[Any]] = set()
@@ -125,11 +130,20 @@ class MaiGOAdapterPlugin(MaiBotPlugin):
             db_path=cfg.backfill.db_path,
             clock_ms=self._clock_ms,
         )
+        self._speech_buffer = SpeechWindowBuffer(
+            on_flush=self._send_events_safe,
+            branch_id=(cfg.server.branch_id or "maibot").strip().lower(),
+            enabled=cfg.speech_buffer.enabled,
+            flush_idle_ms=cfg.speech_buffer.flush_idle_ms,
+            max_turns=cfg.speech_buffer.max_turns,
+            min_chars=cfg.speech_buffer.min_chars,
+            clock_ms=self._clock_ms,
+        )
         if self._start_background and cfg.plugin.enabled and cfg.server.url.strip():
             self._poll_task = asyncio.create_task(self._poll_loop(), name="maigo_adapter.poll")
 
     async def on_unload(self) -> None:
-        """停后台轮询、等待收尾上报任务并关闭连接。"""
+        """停后台轮询、刷出窗口归并缓冲、等待收尾上报任务并关闭连接。"""
         for bg in (self._poll_task, self._backfill_task):
             if bg is not None and not bg.done():
                 bg.cancel()
@@ -145,7 +159,7 @@ class MaiGOAdapterPlugin(MaiBotPlugin):
             self._client = None
 
     async def on_config_update(self, scope: str, config_data: Dict[str, Any], version: str) -> None:
-        """响应配置变更：更新白名单、喊人配置与服务端连接参数。"""
+        """响应配置变更：更新白名单、喊人配置、窗口缓冲与服务端连接参数。"""
         del config_data, version
         if scope != "self":
             return
@@ -161,6 +175,14 @@ class MaiGOAdapterPlugin(MaiBotPlugin):
         if self._client is not None:
             await self._client.close()
         self._client = self._build_client(cfg)
+        if self._speech_buffer is not None:
+            self._speech_buffer.update_settings(
+                branch_id=(cfg.server.branch_id or "maibot").strip().lower(),
+                enabled=cfg.speech_buffer.enabled,
+                flush_idle_ms=cfg.speech_buffer.flush_idle_ms,
+                max_turns=cfg.speech_buffer.max_turns,
+                min_chars=cfg.speech_buffer.min_chars,
+            )
         if self._backfiller is not None:
             self._backfiller.update_settings(
                 client=self._client,
@@ -176,7 +198,9 @@ class MaiGOAdapterPlugin(MaiBotPlugin):
             )
 
     async def flush_pending_tasks(self) -> None:
-        """等待在途的异步事件上报任务全部结束（卸载与确定性测试使用）。"""
+        """立即刷出会话窗口缓冲区并等待在途异步事件上报任务全部结束（卸载与确定性测试使用）。"""
+        if self._speech_buffer is not None:
+            await self._speech_buffer.flush_all()
         tasks = [t for t in self._pending_tasks if not t.done()]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -196,12 +220,12 @@ class MaiGOAdapterPlugin(MaiBotPlugin):
             self.ctx.logger.warning(f"MaiGO 插件后台任务 {task.get_name()} 失败: {exc}")
 
     # ------------------------------------------------------------------
-    # 入站追踪与出站自动采集
+    # 入站追踪与出站窗口归并采集
     # ------------------------------------------------------------------
 
     @HookHandler(
         "chat.receive.after_process",
-        description="轻量追踪互通群/私聊会话类型与近期发言人，供出站上下文与跨端名片查询使用",
+        description="轻量追踪互通群/私聊会话类型、近期发言人与当前提问，供预召回与跨端名片使用",
     )
     async def track_inbound_message(self, **kwargs: Any) -> Dict[str, Any]:
         message = kwargs.get("message")
@@ -211,7 +235,7 @@ class MaiGOAdapterPlugin(MaiBotPlugin):
 
     @HookHandler(
         "send_service.after_send",
-        description="麦麦在白名单互通群或私聊成功回复后，异步按 visibility 上报至 MaiGO",
+        description="麦麦在白名单互通群或私聊成功回复后，经噪声过滤与会话窗口归并异步上报至 MaiGO",
     )
     async def report_outbound_speech(self, **kwargs: Any) -> Dict[str, Any]:
         if not self.config.plugin.enabled or not kwargs.get("sent"):
@@ -219,7 +243,7 @@ class MaiGOAdapterPlugin(MaiBotPlugin):
         message = kwargs.get("message")
         if not isinstance(message, dict) or bool(message.get("is_notify", False)):
             return {"action": "continue"}
-        if self._tracker is None or self._client is None:
+        if self._tracker is None or self._client is None or self._speech_buffer is None:
             return {"action": "continue"}
 
         session_id = str(message.get("session_id") or "").strip()
@@ -232,28 +256,23 @@ class MaiGOAdapterPlugin(MaiBotPlugin):
             return {"action": "continue"}
 
         msg_id = str(message.get("message_id") or "").strip() or uuid.uuid4().hex[:12]
-        branch_id = (self.config.server.branch_id or "maibot").strip().lower()
         actors = self._tracker.recent_outbound_actors(session_id)
         inbound_hint = self._tracker.last_inbound_hint(session_id)
         scope_label = "私聊" if vis == "private" else f"群「{self._tracker.group_label(session_id)}」"
-        if inbound_hint:
-            summary = f"在{scope_label}回应（{inbound_hint}）：{verbatim[:160]}"
-        else:
-            summary = f"在{scope_label}说：{verbatim[:180]}"
-
-        event_payload: Dict[str, Any] = {
-            "idempotency_key": f"maibot-send-{msg_id}",
-            "branch_id": branch_id,
-            "occurred_at_ms": self._clock_ms(),
-            "kind": "speech",
-            "actor_role": "self",
-            "visibility": vis,
-            "context_scope": f"{vis}:{session_id}",
-            "actors": actors,
-            "summary": summary[:400],
-            "verbatim": verbatim[:4000],
-        }
-        self._spawn_background(self._send_events_safe([event_payload]), name="maigo_adapter.report_send")
+        # 入队窗口缓冲器：过滤命令回执/水词，达到轮次上限立即弹出，否则按空闲窗口合并后自动刷出
+        ready_events = self._speech_buffer.enqueue(
+            session_id=session_id,
+            visibility=vis,
+            scope_label=scope_label,
+            msg_id=msg_id,
+            verbatim=verbatim,
+            inbound_hint=inbound_hint,
+            actors=actors,
+            is_command=bool(message.get("is_command", False)),
+            is_notify=bool(message.get("is_notify", False)),
+        )
+        if ready_events:
+            self._spawn_background(self._send_events_safe(ready_events), name="maigo_adapter.report_send")
         return {"action": "continue"}
 
     async def _send_events_safe(self, events: List[Dict[str, Any]]) -> None:
@@ -270,7 +289,7 @@ class MaiGOAdapterPlugin(MaiBotPlugin):
 
     @HookHandler(
         "maisaka.planner.before_request",
-        description="规划前置：将慢层跨端生活简报插入系统提示词稳定位，快层动态近况与熟人名片附于末尾",
+        description="规划前置：注入稳定位慢层简报（含工具分工提示）与末尾快层动态、熟人名片及高置信度自动预召回",
     )
     async def inject_into_planner(self, **kwargs: Any) -> Dict[str, Any]:
         if not self.config.plugin.enabled or not self.config.injection.inject_planner:
@@ -294,15 +313,17 @@ class MaiGOAdapterPlugin(MaiBotPlugin):
                 )
             return {"action": "continue"}
 
+        branch_id = (self.config.server.branch_id or "maibot").strip().lower()
         cached = self._cache.view_of(vis)
         active_actors = (
             self._tracker.recent_actors_param(session_id) if self.config.injection.include_actor_cards else ""
         )
         actor_cards: List[Dict[str, Any]] = []
+        pre_recalled = ""
         if self._client is not None and self.config.server.url.strip():
             try:
                 raw = await self._client.get_context(
-                    branch_id=(self.config.server.branch_id or "maibot").strip().lower(),
+                    branch_id=branch_id,
                     target_visibility=vis,
                     if_brief_etag=cached.brief_etag,
                     active_actors=active_actors,
@@ -312,6 +333,29 @@ class MaiGOAdapterPlugin(MaiBotPlugin):
                 actor_cards = [dict(card) for card in (raw.get("actor_cards") or ()) if isinstance(card, dict)]
             except MaiGOClientError as exc:
                 self.ctx.logger.warning(f"拉取 MaiGO 实时上下文失败，改用本地持久化缓存: {exc}")
+
+            # 双保险自动预召回：仅对有效提问以短超时查强命中跨端细节，未命中或超时静默跳过不拖慢主链
+            query_text = self._tracker.last_inbound_query(session_id)
+            if self.config.injection.pre_recall_enabled and is_pre_recall_candidate_query(query_text):
+                try:
+                    pre_recalled = (
+                        await self._client.recall_life(
+                            query=query_text[:120],
+                            days=0,
+                            limit=3,
+                            target_visibility=vis,
+                            branch_id=branch_id,
+                            high_confidence_only=True,
+                            timeout_ms=self.config.injection.pre_recall_timeout_ms,
+                        )
+                    ).strip()
+                except MaiGOClientError as exc:
+                    self.ctx.logger.debug(f"规划前置自动预召回跳过（不阻塞主链）: {exc}")
+
+        if pre_recalled:
+            self._last_pre_recall[session_id] = (self._clock_ms(), pre_recalled)
+        else:
+            self._last_pre_recall.pop(session_id, None)
 
         new_items = list(items)
         if cached.stable_brief.strip():
@@ -325,6 +369,7 @@ class MaiGOAdapterPlugin(MaiBotPlugin):
             actor_cards=actor_cards if self.config.injection.include_actor_cards else (),
             fresh_topics=cached.fresh_topics if self.config.injection.include_topics else (),
             open_promises=cached.open_promises,
+            pre_recalled=pre_recalled,
         )
         if dynamic_text:
             new_items = insert_dynamic_context_item(
@@ -336,7 +381,7 @@ class MaiGOAdapterPlugin(MaiBotPlugin):
 
     @HookHandler(
         "maisaka.replyer.before_request",
-        description="回复前置：补充跨端近期立场、未了结约定与直播近况，保证发言连贯",
+        description="回复前置：精简注入动态近况、待兑现约定与本轮预召回细节，不重复堆砌长篇慢层",
     )
     async def inject_into_replyer(self, **kwargs: Any) -> Dict[str, Any]:
         if not self.config.plugin.enabled or not self.config.injection.inject_replyer:
@@ -350,17 +395,27 @@ class MaiGOAdapterPlugin(MaiBotPlugin):
             return {"action": "continue"}
 
         view = self._cache.view_of(vis)
+        max_live = max(100, int(self.config.injection.replyer_max_chars))
         snippets: List[str] = []
         if view.live_context.strip():
-            snippets.append(f"跨端动态：{view.live_context.strip()}")
+            live_short = view.live_context.strip()
+            if len(live_short) > max_live:
+                live_short = live_short[: max_live - 1].rstrip() + "…"
+            snippets.append(f"跨端动态：{live_short}")
         if view.open_promises:
             promise_titles = "；".join(
                 str(p.get("content") or "").strip() for p in view.open_promises[:3] if p.get("content")
             )
             if promise_titles:
                 snippets.append(f"待兑现约定：{promise_titles}")
-        if view.stable_brief.strip():
-            snippets.append(view.stable_brief.strip())
+
+        # 若本轮规划前置命中了高置信度跨端细节（60 秒有效期内），同步透传给回复器避免细节丢漏
+        cached_recall = self._last_pre_recall.get(session_id)
+        if cached_recall is not None:
+            ts_ms, recalled_text = cached_recall
+            if self._clock_ms() - ts_ms <= _PRE_RECALL_CACHE_TTL_MS and recalled_text:
+                snippets.append(f"相关跨端回忆：\n{recalled_text}")
+
         if not snippets:
             return {"action": "continue"}
 
@@ -376,20 +431,20 @@ class MaiGOAdapterPlugin(MaiBotPlugin):
     @Tool(
         "recall_life",
         description=(
-            "回想你最近在各个地方（QQ 群、B 站、直播、MC 游戏）的经历、发表过的观点与待办约定。"
-            "有人问起你做过某件事的细节或之前刷到什么内容时使用。"
+            "深度翻查你在各个地方（历次直播、MC 存档进展、B 站见闻、QQ 群、跨端熟人）的原件细节、观点与待办约定。"
+            "有人问起往期直播细节、游戏里造过什么或之前刷到过什么内容时优先调用；需要查超过 30 天的历史可传 days=0。"
         ),
         parameters=[
             ToolParameterInfo(
                 name="query",
                 param_type=ToolParamType.STRING,
-                description="想要回想的关键词或主题（例如「手工视频」「新灯塔」）",
+                description="想要回想的关键词或主题（例如「晶体装配器」「下界 远古残骸」）",
                 required=True,
             ),
             ToolParameterInfo(
                 name="days",
                 param_type=ToolParamType.INTEGER,
-                description="往前检索几天，默认 7",
+                description="往前检索几天，默认 30；传 0 表示不限天数翻查全部历史",
                 required=False,
             ),
             ToolParameterInfo(
@@ -400,15 +455,16 @@ class MaiGOAdapterPlugin(MaiBotPlugin):
             ),
         ],
     )
-    async def handle_recall_life(self, query: Any = "", days: Any = 7, limit: Any = 5, **kwargs: Any) -> Dict[str, Any]:
-        """按当前对话会话可见性调用 MaiGO 检索历史详情。"""
+    async def handle_recall_life(self, query: Any = "", days: Any = 30, limit: Any = 5, **kwargs: Any) -> Dict[str, Any]:
+        """按当前对话会话可见性调用 MaiGO 检索跨端原件书库与历史详情。"""
         if not self.config.plugin.enabled or self._client is None:
             return {"success": False, "error": "MaiGO 跨端同步未启用"}
         cleaned_query = str(query or "").strip()
         if not cleaned_query:
             return {"success": False, "error": "请提供想要检索的关键词"}
         try:
-            days_int = max(1, min(90, int(days or 7)))
+            raw_days = 30 if days is None else int(days)
+            days_int = max(0, min(365, raw_days))
             limit_int = max(1, min(20, int(limit or 5)))
         except (TypeError, ValueError):
             return {"success": False, "error": "days 与 limit 必须是整数"}
@@ -426,12 +482,14 @@ class MaiGOAdapterPlugin(MaiBotPlugin):
                 if resolved in ("group", "private"):
                     target_vis = resolved
 
+        branch_id = (self.config.server.branch_id or "maibot").strip().lower()
         try:
             text = await self._client.recall_life(
                 query=cleaned_query,
                 days=days_int,
                 limit=limit_int,
                 target_visibility=target_vis,
+                branch_id=branch_id,
             )
             return {"success": True, "content": text}
         except MaiGOClientError as exc:

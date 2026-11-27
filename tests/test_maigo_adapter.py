@@ -125,13 +125,26 @@ class _StubMaiGOClient:
         self,
         *,
         query: str,
-        days: int = 7,
+        days: int = 30,
         limit: int = 5,
         target_visibility: str = "public",
+        branch_id: str = "",
+        high_confidence_only: bool = False,
+        timeout_ms: int | None = None,
     ) -> str:
         if self.fail_network:
             raise plugin_mod.MaiGOClientError("network down")
-        self.recall_calls.append({"query": query, "days": days, "limit": limit, "target_visibility": target_visibility})
+        self.recall_calls.append(
+            {
+                "query": query,
+                "days": days,
+                "limit": limit,
+                "target_visibility": target_visibility,
+                "branch_id": branch_id,
+                "high_confidence_only": high_confidence_only,
+                "timeout_ms": timeout_ms,
+            }
+        )
         return self.recall_reply
 
     async def close(self) -> None:

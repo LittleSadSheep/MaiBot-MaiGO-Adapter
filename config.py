@@ -68,9 +68,33 @@ class InjectionConfig(PluginConfigBase):
     __ui_label__ = "上下文注入"
 
     inject_planner: bool = Field(default=True, description="是否在规划请求前注入慢层今日生活与快层动态上下文")
-    inject_replyer: bool = Field(default=True, description="是否在生成回复前附加近期立场与直播近况参考")
+    inject_replyer: bool = Field(default=True, description="是否在生成回复前附加精简动态近况、约定与本轮预召回")
     include_actor_cards: bool = Field(default=True, description="是否按近期发言对象向规划器附加脱敏跨端熟人提示")
     include_topics: bool = Field(default=True, description="是否在群聊动态上下文中附上未聊过的鲜活话头")
+    pre_recall_enabled: bool = Field(default=True, description="规划前是否对当前消息做短超时高置信度跨端预召回")
+    pre_recall_timeout_ms: int = Field(
+        default=400,
+        ge=100,
+        le=5_000,
+        description="规划前置自动预召回的单次超时预算（毫秒，超时静默放行不阻塞主链）",
+    )
+    replyer_max_chars: int = Field(
+        default=600,
+        ge=100,
+        le=3_000,
+        description="回复前置精简注入的动态近况最大字符数",
+    )
+
+
+class SpeechBufferConfig(PluginConfigBase):
+    """出站发言会话窗口归并配置。"""
+
+    __ui_label__ = "出站窗口归并"
+
+    enabled: bool = Field(default=True, description="是否将同会话连续多轮回复按空闲窗口合并上报")
+    flush_idle_ms: int = Field(default=90_000, ge=0, le=600_000, description="同会话停顿多久后刷出归并段（毫秒）")
+    max_turns: int = Field(default=6, ge=1, le=30, description="单段最多聚合几轮回复后立即刷出")
+    min_chars: int = Field(default=4, ge=1, le=50, description="过滤短水词与回执的最少有效字数")
 
 
 class GoLiveNotifyConfig(PluginConfigBase):
@@ -118,5 +142,6 @@ class MaiGOAdapterConfig(PluginConfigBase):
     server: MaiGOServerConfig = Field(default_factory=MaiGOServerConfig)
     scope: ScopeConfig = Field(default_factory=ScopeConfig)
     injection: InjectionConfig = Field(default_factory=InjectionConfig)
+    speech_buffer: SpeechBufferConfig = Field(default_factory=SpeechBufferConfig)
     go_live: GoLiveNotifyConfig = Field(default_factory=GoLiveNotifyConfig)
     backfill: BackfillConfig = Field(default_factory=BackfillConfig)
