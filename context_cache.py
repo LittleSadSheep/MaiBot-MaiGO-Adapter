@@ -75,6 +75,7 @@ class SessionTracker:
         platform: str,
         group_ids: Sequence[str],
         sync_private: bool = True,
+        public_fallback_groups: bool = True,
         logger: Optional[logging.Logger] = None,
         clock_ms: Callable[[], int] = _default_now_ms,
         retry_ms: int = _RESOLVE_RETRY_MS,
@@ -86,6 +87,7 @@ class SessionTracker:
         self._platform = "qq"
         self._group_ids: Tuple[str, ...] = ()
         self._sync_private = bool(sync_private)
+        self._public_fallback_groups = bool(public_fallback_groups)
         self._whitelist_streams: Dict[str, str] = {}
         self._group_names: Dict[str, str] = {}
         self._last_try_ms: Dict[str, int] = {}
@@ -94,13 +96,26 @@ class SessionTracker:
         self._recent_actors: Dict[str, List[TrackedActor]] = {}
         self._last_inbound_summary: Dict[str, str] = {}
         self._last_inbound_raw: Dict[str, str] = {}
-        self.update_settings(platform=platform, group_ids=group_ids, sync_private=sync_private)
+        self.update_settings(
+            platform=platform,
+            group_ids=group_ids,
+            sync_private=sync_private,
+            public_fallback_groups=public_fallback_groups,
+        )
 
-    def update_settings(self, *, platform: str, group_ids: Sequence[str], sync_private: bool) -> None:
+    def update_settings(
+        self,
+        *,
+        platform: str,
+        group_ids: Sequence[str],
+        sync_private: bool,
+        public_fallback_groups: bool = True,
+    ) -> None:
         """配置热更新时重置白名单会话缓存，确保变更立即生效。"""
         self._platform = (platform or "qq").strip() or "qq"
         self._group_ids = tuple(dict.fromkeys(item.strip() for item in group_ids if item.strip()))
         self._sync_private = bool(sync_private)
+        self._public_fallback_groups = bool(public_fallback_groups)
         self._whitelist_streams.clear()
         self._group_names.clear()
         self._last_try_ms.clear()
@@ -158,7 +173,7 @@ class SessionTracker:
         self._recent_actors[session_id] = bucket[:_MAX_RECENT_ACTORS_PER_SESSION]
 
     async def resolve_visibility(self, session_id: str) -> Optional[str]:
-        """根据会话 ID 裁决跨端可见性档位（group / private / None 不互通）。"""
+        """根据会话 ID 裁决双向互通可见性档位（白名单群=group / 私聊=private / None 不上报）。"""
         sid = str(session_id or "").strip()
         if not sid:
             return None
@@ -173,6 +188,24 @@ class SessionTracker:
         await self._resolve_missing_groups()
         if sid in self._whitelist_streams:
             return "group"
+        return None
+
+    async def resolve_injection_visibility(self, session_id: str) -> Optional[str]:
+        """裁决规划/回复只读注入的可见性档位。
+
+        触发条件：Planner / Replyer 前置钩子注入跨端背景前调用；
+        执行顺序：先走白名单群（group）与私聊（private）严格判定 -> 若未命中但已确认为群聊
+        且开启 ``public_fallback_groups``，降级返回 ``public`` 只读视图，避免新群完全失忆，
+        同时严禁对关闭同步的私聊或未知会话泄漏更高权限记忆。
+        """
+        strict = await self.resolve_visibility(session_id)
+        if strict is not None:
+            return strict
+        sid = str(session_id or "").strip()
+        if not sid or not self._public_fallback_groups:
+            return None
+        if self._session_kinds.get(sid) == "group":
+            return "public"
         return None
 
     def allows_group(self, group_id: str, platform: str = "") -> bool:

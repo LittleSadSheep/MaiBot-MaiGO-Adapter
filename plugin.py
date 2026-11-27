@@ -98,6 +98,7 @@ class MaiGOAdapterPlugin(MaiBotPlugin):
             platform=cfg.scope.platform,
             group_ids=cfg.scope.group_ids,
             sync_private=cfg.scope.sync_private,
+            public_fallback_groups=cfg.scope.public_fallback_groups,
             logger=self.ctx.logger,
             clock_ms=self._clock_ms,
         )
@@ -169,6 +170,7 @@ class MaiGOAdapterPlugin(MaiBotPlugin):
                 platform=cfg.scope.platform,
                 group_ids=cfg.scope.group_ids,
                 sync_private=cfg.scope.sync_private,
+                public_fallback_groups=cfg.scope.public_fallback_groups,
             )
         if self._go_live is not None:
             self._go_live.update_settings(self._go_live_settings(cfg))
@@ -298,7 +300,7 @@ class MaiGOAdapterPlugin(MaiBotPlugin):
             return {"action": "continue"}
 
         session_id = str(kwargs.get("session_id") or "").strip()
-        vis = await self._tracker.resolve_visibility(session_id)
+        vis = await self._tracker.resolve_injection_visibility(session_id)
         if vis is None:
             return {"action": "continue"}
 
@@ -315,8 +317,11 @@ class MaiGOAdapterPlugin(MaiBotPlugin):
 
         branch_id = (self.config.server.branch_id or "maibot").strip().lower()
         cached = self._cache.view_of(vis)
+        # 非白名单群走 public 只读兜底时不查询跨端熟人名片，严守群间隐私边界
         active_actors = (
-            self._tracker.recent_actors_param(session_id) if self.config.injection.include_actor_cards else ""
+            self._tracker.recent_actors_param(session_id)
+            if self.config.injection.include_actor_cards and vis != "public"
+            else ""
         )
         actor_cards: List[Dict[str, Any]] = []
         pre_recalled = ""
@@ -399,7 +404,7 @@ class MaiGOAdapterPlugin(MaiBotPlugin):
             return {"action": "continue"}
 
         session_id = str(kwargs.get("session_id") or "").strip()
-        vis = await self._tracker.resolve_visibility(session_id)
+        vis = await self._tracker.resolve_injection_visibility(session_id)
         if vis is None:
             return {"action": "continue"}
 
@@ -521,6 +526,8 @@ class MaiGOAdapterPlugin(MaiBotPlugin):
             return
         branch_id = (self.config.server.branch_id or "maibot").strip().lower()
         vis_list = ["group"]
+        if self.config.scope.public_fallback_groups:
+            vis_list.insert(0, "public")
         if self.config.scope.sync_private:
             vis_list.append("private")
         merged_sessions: Dict[str, Dict[str, Any]] = {}

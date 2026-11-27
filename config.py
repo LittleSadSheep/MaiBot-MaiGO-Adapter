@@ -54,7 +54,11 @@ class ScopeConfig(PluginConfigBase):
     platform: str = Field(default="qq", description="QQ 适配器平台名称")
     group_ids: List[str] = Field(
         default_factory=list,
-        description="与直播及跨端生活互通的白名单群号列表；非名单群一律不上报、不注入",
+        description="与直播及跨端生活双向互通的白名单群号列表（按 group 档注入并上报发言）",
+    )
+    public_fallback_groups: bool = Field(
+        default=True,
+        description="非白名单群聊是否默认只读注入 public 级公开跨端背景（绝不上报该群发言、不泄露 group/private 记忆）",
     )
     sync_private: bool = Field(
         default=True,

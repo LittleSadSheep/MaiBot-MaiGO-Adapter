@@ -36,6 +36,23 @@ class _StubMaiGOClient:
         self.recall_calls: List[Dict[str, Any]] = []
         self.fail_network = False
         self.context_by_vis: Dict[str, Dict[str, Any]] = {
+            "public": {
+                "brief_etag": "etag-pub1",
+                "stable_brief": "【麦麦今天的经历】\n- 昨晚直播在 MC 建了海边灯塔。",
+                "live_context": "你刚刚结束了bilibili直播《海边灯塔》。",
+                "actor_cards": [],
+                "fresh_topics": [],
+                "open_promises": [
+                    {
+                        "id": 9,
+                        "anchor_type": "promise",
+                        "content": "下次直播补齐灯塔台阶",
+                        "status": "open",
+                        "source_branch": "amaidesu",
+                    }
+                ],
+                "active_sessions": [],
+            },
             "group": {
                 "brief_etag": "etag-g1",
                 "stable_brief": "【麦麦今天的经历】\n- 下午：在B站刷到手工粘土视频。",
@@ -157,6 +174,7 @@ def _make_config(
     notify_groups: List[str] | None = None,
     delay_ms: int = 300_000,
     sync_private: bool = True,
+    public_fallback_groups: bool = True,
     server_url: str = "http://127.0.0.1:8768",
     token: str = "",
 ) -> Any:
@@ -167,6 +185,7 @@ def _make_config(
             "scope": {
                 "platform": "qq",
                 "group_ids": [WHITELIST_GROUP_ID] if group_ids is None else group_ids,
+                "public_fallback_groups": public_fallback_groups,
                 "sync_private": sync_private,
             },
             "injection": {
@@ -348,11 +367,63 @@ async def test_planner_two_layer_injection_replyer_and_non_whitelist_isolation()
         bad_ver = await plugin.inject_into_planner(session_id=WHITELIST_STREAM_ID, items=items, item_schema_version=99)
         assert bad_ver == {"action": "continue"}
 
-        # 非白名单群不注入
-        non_wl = await plugin.inject_into_planner(
+        # 未知会话（无入站记录）不注入
+        unknown_res = await plugin.inject_into_planner(
             session_id=NON_WHITELIST_STREAM_ID, items=items, item_schema_version=1
         )
-        assert non_wl == {"action": "continue"}
+        assert unknown_res == {"action": "continue"}
+
+        # 非白名单群入站后：默认只读注入 public 公开直播背景（不传熟人名片、不含 group/private 内容、绝不上报发言）
+        await plugin.track_inbound_message(
+            message=_inbound_msg(
+                session_id=NON_WHITELIST_STREAM_ID,
+                user_id="20005",
+                nickname="路人乙",
+                text="刚进群打个招呼",
+                group_id=NON_WHITELIST_GROUP_ID,
+                group_name="其他交流群",
+            )
+        )
+        non_wl_pub = await plugin.inject_into_planner(
+            session_id=NON_WHITELIST_STREAM_ID, items=items, item_schema_version=1
+        )
+        pub_items = non_wl_pub["modified_kwargs"]["items"]
+        assert "海边灯塔" in pub_items[1]["parts"][0]["text"]
+        assert "手工粘土视频" not in pub_items[1]["parts"][0]["text"]
+        assert "私下说过不想公开的小事" not in pub_items[1]["parts"][0]["text"]
+        assert client.context_requests[-1]["target_visibility"] == "public"
+        assert client.context_requests[-1]["active_actors"] == ""
+
+        # 非白名单群 replyer 同样只读注入 public 公开动态，但出站发言严格不上报
+        rep_pub = await plugin.inject_into_replyer(session_id=NON_WHITELIST_STREAM_ID, extra_prompt="")
+        assert "下次直播补齐灯塔台阶" in rep_pub["modified_kwargs"]["extra_prompt"]
+        assert "今晚在 MC 建一座新灯塔" not in rep_pub["modified_kwargs"]["extra_prompt"]
+        await plugin.report_outbound_speech(
+            sent=True,
+            message=_outbound_msg(session_id=NON_WHITELIST_STREAM_ID, message_id="out-pub-only", text="非白名单群回复"),
+        )
+        await plugin.flush_pending_tasks()
+        assert client.posted_batches == []
+
+        # 关闭 public_fallback_groups 后，非白名单群恢复完全不注入
+        plugin._plugin_config_instance = _make_config(public_fallback_groups=False)
+        await plugin.on_config_update("self", {}, "0.1.0")
+        non_wl_off = await plugin.inject_into_planner(
+            session_id=NON_WHITELIST_STREAM_ID, items=items, item_schema_version=1
+        )
+        assert non_wl_off == {"action": "continue"}
+        plugin._plugin_config_instance = _make_config(public_fallback_groups=True)
+        await plugin.on_config_update("self", {}, "0.1.0")
+        # 配置重载后重新追踪白名单会话再测 replyer 与离线降级
+        await plugin.track_inbound_message(
+            message=_inbound_msg(
+                session_id=WHITELIST_STREAM_ID,
+                user_id="10001",
+                nickname="老熟人甲",
+                text="刚来群里看看",
+                group_id=WHITELIST_GROUP_ID,
+            )
+        )
 
         # 回复前置勾子保留现有 extra_prompt 并追加
         rep = await plugin.inject_into_replyer(session_id=WHITELIST_STREAM_ID, extra_prompt="保持俏皮语气")
